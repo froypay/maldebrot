@@ -1,6 +1,12 @@
+C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\Discovery.java
+C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\FirewallManager.java
 C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\Json.java
 C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\MandelbrotRenderer.java
+C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\NetUtils.java
 C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\RenderResult.java
 C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\common\RenderTask.java
+C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\master\MasterAnnouncer.java
 C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\master\MasterMain.java
+C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\master\WorkerRegistry.java
+C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\worker\MasterDiscovery.java
 C:\Users\KoHeP\IdeaProjects\mald\src\com\example\mandelbrot\worker\WorkerMain.java
