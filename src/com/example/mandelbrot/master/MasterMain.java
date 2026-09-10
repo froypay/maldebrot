@@ -6,9 +6,11 @@ import com.sun.net.httpserver.HttpServer;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -16,6 +18,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -24,97 +28,119 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.nio.file.Files;
-import java.nio.file.Path;
 
-/**
- * Мастер — координатор распределённого рендера.
- *
- * Роли:
- *   1) HTTP-сервер, к которому подключаются воркеры (register + heartbeat).
- *   2) Раздатчик задач: берёт зарегистрированных живых воркеров
- *      и распределяет между ними полосы фрактала.
- *   3) Сборщик: копирует полученные пиксели в общий BufferedImage.
- *
- * Паттерны: Master-Worker, Scatter-Gather, Data Parallelism, Health Check,
- *           Work Distribution через AtomicInteger, Retry.
- */
 public final class MasterMain {
 
     // ---------- Конфигурация рендера ----------
-    static final int WIDTH        = 8000;
-    static final int HEIGHT       = 6000;
-    static final int MAX_ITER     = 2000;
-    static final double X_MIN     = -2.5;
-    static final double X_MAX     =  1.0;
-    static final double Y_MIN     = -1.2;
-    static final double Y_MAX     =  1.2;
-    static final int STRIP_HEIGHT = 40;
+    static int WIDTH        = 1600;
+    static int HEIGHT       = 1200;
+    static int MAX_ITER     = 500;
+    static double X_MIN     = -2.5;
+    static double X_MAX     =  1.0;
+    static double Y_MIN     = -1.2;
+    static double Y_MAX     =  1.2;
+    static int STRIP_HEIGHT = 40;
 
-    // ---------- Конфигурация сети ----------
-    /** Порт, на котором мастер слушает воркеров. */
-    static final int MASTER_PORT  = 9000;
-    /** Сколько ждать воркеров перед автостартом рендера (сек). */
-    static final int WAIT_WORKERS_SEC = 15;
-    /** Через сколько миллисекунд без heartbeat воркер считается мёртвым. */
-    static final long WORKER_TIMEOUT_MS = 10_000;
+    // ---------- Сеть ----------
+    static final int MASTER_PORT = 9000;
+    static final long WORKER_TIMEOUT_MS = 30_000; // для реестра (не используется в ping-модели)
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
 
-    private static final WorkerRegistry REGISTRY = new WorkerRegistry(WORKER_TIMEOUT_MS);
+    private static final WorkerRegistry REGISTRY = new WorkerRegistry();
 
     public static void main(String[] args) throws Exception {
+        // Разбор аргументов (те же, что раньше).
+        String announceIp = null;
         boolean skipFirewall = false;
-        for (String a : args) {
-            if ("--no-firewall".equals(a)) skipFirewall = true;
-        }
-
-        if (!skipFirewall) {
-            FirewallManager.Status st = FirewallManager.ensureRule(
-                    "Mandelbrot Master " + MASTER_PORT, MASTER_PORT, true);
-            if (st == FirewallManager.Status.PERMISSION_DENIED
-                    || st == FirewallManager.Status.FAILED) {
-                log("ВНИМАНИЕ: правило фаервола не создано. "
-                        + "Воркеры в локальной сети могут не подключиться.");
-                log("Разрешите доступ вручную при запросе Windows "
-                        + "или запустите с --no-firewall, чтобы пропустить этот шаг.");
+        for (int i = 0; i < args.length; i++) {
+            String a = args[i];
+            switch (a) {
+                case "--width"        -> WIDTH        = Integer.parseInt(args[++i]);
+                case "--height"       -> HEIGHT       = Integer.parseInt(args[++i]);
+                case "--max-iter"     -> MAX_ITER     = Integer.parseInt(args[++i]);
+                case "--strip"        -> STRIP_HEIGHT = Integer.parseInt(args[++i]);
+                case "--x-min"        -> X_MIN        = Double.parseDouble(args[++i]);
+                case "--x-max"        -> X_MAX        = Double.parseDouble(args[++i]);
+                case "--y-min"        -> Y_MIN        = Double.parseDouble(args[++i]);
+                case "--y-max"        -> Y_MAX        = Double.parseDouble(args[++i]);
+                case "--announce-ip"  -> announceIp   = args[++i];
+                case "--no-firewall"  -> skipFirewall = true;
+                default -> {
+                    log("Неизвестный аргумент: " + a);
+                    System.exit(2);
+                }
             }
-        } else {
-            log("проверка фаервола пропущена (--no-firewall)");
+        }
+
+        // Фаервол.
+        if (!skipFirewall) {
+            FirewallManager.Status s1 = FirewallManager.ensureRule(
+                    "Mandelbrot Master HTTP", MASTER_PORT, "TCP", true);
+            FirewallManager.Status s2 = FirewallManager.ensureRule(
+                    "Mandelbrot Master Discovery", Discovery.DISCOVERY_PORT, "UDP", true);
+
+            if (s1 == FirewallManager.Status.PERMISSION_DENIED
+                    || s1 == FirewallManager.Status.FAILED
+                    || s2 == FirewallManager.Status.PERMISSION_DENIED
+                    || s2 == FirewallManager.Status.FAILED) {
+                log("ВНИМАНИЕ: не все правила фаервола созданы.");
+                log("Воркеры могут не найти мастера или не подключиться.");
+            }
         }
 
         log("стартую HTTP-сервер мастера на порту " + MASTER_PORT);
         startHttpServer(MASTER_PORT);
+
+        // Announcer — рассылает broadcast.
+        MasterAnnouncer announcer = new MasterAnnouncer(MASTER_PORT, announceIp);
+        announcer.start();
+
+        // Health monitor — пингует воркеров каждые 10 сек.
+        REGISTRY.startHealthMonitor();
+
         writeMyIpFile();
 
-        log("стартую HTTP-сервер мастера на порту " + MASTER_PORT);
-        startHttpServer(MASTER_PORT);
+        log("параметры рендера: " + WIDTH + "x" + HEIGHT
+                + ", maxIter=" + MAX_ITER
+                + ", strip=" + STRIP_HEIGHT);
 
-        // Пишем свой IP в файл, чтобы воркеры знали, куда подключаться.
-        writeMyIpFile();
+        // Основной цикл: ждём Enter → рендерим → снова ждём.
+        BufferedReader console = new BufferedReader(
+                new InputStreamReader(System.in));
 
-        log("жду воркеров... (автостарт рендера через " + WAIT_WORKERS_SEC + " с)");
-        waitForWorkers(WAIT_WORKERS_SEC);
+        while (true) {
+            log("");
+            log("=== Нажмите Enter, чтобы начать рендер ===");
+            log("=== (Ctrl+C — выход) ===");
+            String line = console.readLine();
+            if (line == null) break; // EOF
 
-        List<WorkerRegistry.Entry> alive = REGISTRY.alive();
-        if (alive.isEmpty()) {
-            log("Нет живых воркеров — выходим.");
-            System.exit(1);
+            List<WorkerRegistry.Entry> alive = REGISTRY.alive();
+            if (alive.isEmpty()) {
+                log("Нет живых воркеров — жду подключения...");
+                log("(воркеры подключаются автоматически по broadcast)");
+                continue;
+            }
+            log("живых воркеров: " + alive.size());
+            for (WorkerRegistry.Entry e : alive) {
+                log("  " + e.workerId + "  " + e.baseUrl);
+            }
+
+            try {
+                renderAndSave(alive);
+            } catch (Exception e) {
+                log("ошибка рендера: " + e.getMessage());
+            }
+            // После рендера — снова ждём Enter.
         }
-        log("живых воркеров: " + alive.size());
-        for (WorkerRegistry.Entry e : alive) {
-            log("  " + e.workerId + "  " + e.baseUrl);
-        }
-
-        renderAndSave(alive);
-        log("готово, мастер завершает работу");
-        System.exit(0);
+        log("выход");
     }
 
     // ============================================================
-    //  HTTP-сервер мастера: /register, /heartbeat, /workers
+    //  HTTP-сервер мастера (те же эндпоинты, что были)
     // ============================================================
 
     private static void startHttpServer(int port) throws IOException {
@@ -137,8 +163,6 @@ public final class MasterMain {
             String workerId = j.getString("workerId");
             String baseUrl  = j.getString("baseUrl");
             REGISTRY.register(workerId, baseUrl);
-            log("зарегистрирован воркер: " + workerId + " @ " + baseUrl
-                    + "  (всего: " + REGISTRY.size() + ")");
             send(ex, 200, "{\"status\":\"registered\"}");
         } catch (Exception e) {
             log("ошибка /register: " + e.getMessage());
@@ -154,14 +178,7 @@ public final class MasterMain {
         try {
             String body = readBody(ex.getRequestBody());
             Json j = Json.parse(body);
-            String workerId = j.getString("workerId");
-            String baseUrl  = j.getString("baseUrl");
-            boolean wasKnown = REGISTRY.all().stream()
-                    .anyMatch(e -> e.workerId.equals(workerId));
-            REGISTRY.heartbeat(workerId, baseUrl);
-            if (!wasKnown) {
-                log("воркер переоткрылся после падения: " + workerId);
-            }
+            REGISTRY.heartbeat(j.getString("workerId"), j.getString("baseUrl"));
             send(ex, 200, "{\"status\":\"ok\"}");
         } catch (Exception e) {
             send(ex, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
@@ -169,7 +186,6 @@ public final class MasterMain {
     }
 
     private static void handleWorkers(HttpExchange ex) throws IOException {
-        // Простой отладочный ответ: список воркеров, JSON-массив вручную.
         StringBuilder sb = new StringBuilder();
         sb.append("{\"workers\":[");
         List<WorkerRegistry.Entry> all = REGISTRY.all();
@@ -179,6 +195,7 @@ public final class MasterMain {
             if (i > 0) sb.append(',');
             sb.append("{\"workerId\":\"").append(e.workerId).append("\",");
             sb.append("\"baseUrl\":\"").append(e.baseUrl).append("\",");
+            sb.append("\"alive\":").append(e.alive).append(',');
             sb.append("\"ageMs\":").append(now - e.lastSeenMs).append('}');
         }
         sb.append("]}");
@@ -186,24 +203,7 @@ public final class MasterMain {
     }
 
     // ============================================================
-    //  Ожидание воркеров
-    // ============================================================
-
-    private static void waitForWorkers(int seconds) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + seconds * 1000L;
-        while (System.currentTimeMillis() < deadline) {
-            REGISTRY.prune();
-            List<WorkerRegistry.Entry> alive = REGISTRY.alive();
-            if (!alive.isEmpty()) {
-                log("уже есть живые воркеры: " + alive.size());
-                // Не выходим сразу — даём шанс подключиться остальным.
-            }
-            Thread.sleep(1000);
-        }
-    }
-
-    // ============================================================
-    //  Сам рендер
+    //  Рендер — та же логика, что была
     // ============================================================
 
     private static void renderAndSave(List<WorkerRegistry.Entry> alive) throws Exception {
@@ -323,6 +323,23 @@ public final class MasterMain {
     }
 
     // ============================================================
+    //  IP-файл
+    // ============================================================
+
+    private static void writeMyIpFile() {
+        try {
+            String localIp = NetUtils.detectLocalIp("8.8.8.8");
+            String url = "http://" + localIp + ":" + MASTER_PORT;
+            Path file = Path.of(System.getProperty("user.home"), "master-ip.txt");
+            Files.writeString(file, url + System.lineSeparator());
+            log("мой IP для воркеров: " + url);
+            log("записал в " + file.toAbsolutePath());
+        } catch (Exception e) {
+            log("не удалось записать master-ip.txt: " + e.getMessage());
+        }
+    }
+
+    // ============================================================
     //  Утилиты
     // ============================================================
 
@@ -346,41 +363,5 @@ public final class MasterMain {
 
     private static void log(String msg) {
         System.out.println("[master] " + msg);
-    }
-
-    /**
-     * Пишет в master-ip.txt строку вида:
-     *   http://192.168.1.10:9000
-     * которую нужно передавать воркерам: --master <эта-строка>
-     *
-     * Файл кладём в домашнюю папку пользователя (user.home) — туда
-     * точно есть права на запись, и вы всегда его найдёте,
-     * независимо от того, откуда запущен мастер.
-     */
-    private static void writeMyIpFile() {
-        try {
-            // Определяем локальный IP, через который нас видят другие машины.
-            String localIp = NetUtils.detectLocalIp("8.8.8.8");
-            String url = "http://" + localIp + ":" + MASTER_PORT;
-
-            // Кладём файл в C:\Users\<имя>\
-            String userHome = System.getProperty("user.home");
-            Path file = Path.of(userHome, "master-ip.txt");
-            Files.writeString(file, url + System.lineSeparator());
-
-            log("мой IP для воркеров: " + url);
-            log("записал в " + file.toAbsolutePath());
-
-            // Дублируем в рабочую директорию (рядом с exe, если запущено через start-master.cmd).
-            try {
-                Path cwdFile = Path.of("master-ip.txt").toAbsolutePath();
-                Files.writeString(cwdFile, url + System.lineSeparator());
-                log("дубликат:   " + cwdFile);
-            } catch (Exception ignored) {
-                // Нет прав — не страшно, главный файл уже в user.home.
-            }
-        } catch (Exception e) {
-            log("не удалось записать master-ip.txt: " + e.getMessage());
-        }
     }
 }

@@ -4,7 +4,7 @@ import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Управление правилом Windows Firewall для входящего TCP-порта.
+ * Управление правилом Windows Firewall для входящего TCP/UDP-порта.
  *
  * Задача — обеспечить, чтобы приложение могло принимать входящие
  * соединения на своём порту. Windows по умолчанию блокирует
@@ -37,16 +37,20 @@ public final class FirewallManager {
      * Проверяет и при необходимости создаёт правило фаервола.
      *
      * @param ruleName имя правила (например, "Mandelbrot Master 9000")
-     * @param port     TCP-порт, который нужно разрешить
+     * @param port     порт, который нужно разрешить
+     * @param protocol "TCP" или "UDP"
      * @param verbose  печатать ли подробные сообщения
      * @return статус операции
      */
-    public static Status ensureRule(String ruleName, int port, boolean verbose) {
+    public static Status ensureRule(String ruleName, int port,
+                                    String protocol, boolean verbose) {
         if (!isWindows()) {
             if (verbose) System.out.println(
                     "[firewall] не Windows — правило не требуется");
             return Status.NOT_APPLICABLE;
         }
+
+        String proto = normalizeProtocol(protocol);
 
         // 1. Проверяем, есть ли уже правило.
         if (ruleExists(ruleName)) {
@@ -57,9 +61,10 @@ public final class FirewallManager {
 
         // 2. Пытаемся создать правило.
         if (verbose) System.out.println(
-                "[firewall] создаю правило: " + ruleName + " (порт " + port + ")");
+                "[firewall] создаю правило: " + ruleName
+                        + " (" + proto + " " + port + ")");
 
-        Status status = createRule(ruleName, port, verbose);
+        Status status = createRule(ruleName, port, proto, verbose);
         if (status == Status.CREATED) {
             if (verbose) System.out.println(
                     "[firewall] правило создано");
@@ -73,6 +78,13 @@ public final class FirewallManager {
         return status;
     }
 
+    /**
+     * Удобная перегрузка для TCP — обратная совместимость.
+     */
+    public static Status ensureRule(String ruleName, int port, boolean verbose) {
+        return ensureRule(ruleName, port, "TCP", verbose);
+    }
+
     // ============================================================
     //  Внутренняя кухня
     // ============================================================
@@ -80,6 +92,17 @@ public final class FirewallManager {
     private static boolean isWindows() {
         String os = System.getProperty("os.name", "").toLowerCase();
         return os.contains("win");
+    }
+
+    /** Приводим протокол к верхнему регистру, отсекаем мусор. */
+    private static String normalizeProtocol(String protocol) {
+        if (protocol == null) return "TCP";
+        String p = protocol.trim().toUpperCase();
+        if (!p.equals("TCP") && !p.equals("UDP")) {
+            // Не падаем — просто дефолт.
+            return "TCP";
+        }
+        return p;
     }
 
     /** Проверка через PowerShell: есть ли правило с таким именем. */
@@ -93,36 +116,37 @@ public final class FirewallManager {
 
     /**
      * Создаёт правило через PowerShell, запущенный с повышенными правами (UAC).
-     * Возвращает:
-     *   CREATED — если команда прошла успешно;
-     *   PERMISSION_DENIED — если пользователь отклонил UAC;
-     *   FAILED — если что-то другое.
      */
-    private static Status createRule(String ruleName, int port, boolean verbose) {
-        // Внутренняя команда PowerShell, которую нужно выполнить от админа.
-        // Кавычки внутри аккуратно экранируем.
+    private static Status createRule(String ruleName, int port,
+                                     String protocol, boolean verbose) {
+        // Внутренняя команда PowerShell.
         String inner = "New-NetFirewallRule -DisplayName '"
                 + escapeSingle(ruleName)
-                + "' -Direction Inbound -Protocol TCP -LocalPort "
-                + port
+                + "' -Direction Inbound -Protocol " + protocol
+                + " -LocalPort " + port
                 + " -Action Allow";
 
-        // Start-Process -Verb RunAs — это UAC-повышение.
-        // -Wait — ждём завершения, чтобы узнать exit code.
-        // -PassThru + $p.ExitCode — узнаём, чем закончилось.
-        String outer =
-                "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList "
-                        + "'-NoProfile', '-Command', \""
-                        + inner.replace("\"", "`\"")
-                        + "\"; "
-                        + "if ($p.ExitCode -eq 0) { exit 0 } else { exit 1 }";
+        // Кодируем команду в Base64 (UTF-16LE), чтобы Start-Process
+        // не пытался её парсить как свои параметры.
+        String encoded = encodeForPowerShell(inner);
+
+        // Start-Process -Verb RunAs → UAC.
+        // -EncodedCommand принимает одну строку и не парсит её.
+        String outer = "$p = Start-Process powershell "
+                + "-Verb RunAs -Wait -PassThru "
+                + "-ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', "
+                + "'-EncodedCommand', '" + encoded + "'); "
+                + "if ($p.ExitCode -eq 0) { exit 0 } else { exit 1 }";
 
         int code = runPowerShell(outer, verbose);
         if (code == 0) return Status.CREATED;
-        // Start-Process -Verb RunAs при отказе от UAC возвращает код 1
-        // или выбрасывает исключение, которое тоже даёт ненулевой exit.
-        // Точную причину не всегда можно различить, поэтому:
         return Status.PERMISSION_DENIED;
+    }
+
+    /** Кодирует строку в Base64 (UTF-16LE) для -EncodedCommand. */
+    private static String encodeForPowerShell(String script) {
+        byte[] bytes = script.getBytes(java.nio.charset.StandardCharsets.UTF_16LE);
+        return java.util.Base64.getEncoder().encodeToString(bytes);
     }
 
     /** Запускает powershell с командой. Возвращает exit code (-1 при таймауте/ошибке). */
