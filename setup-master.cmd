@@ -31,7 +31,7 @@ if errorlevel 1 (
 )
 
 REM ---------- 2. Сборка jar ----------
-echo [1/4] Сборка jar...
+echo [1/3] Сборка jar...
 call "%~dp0build.cmd"
 if errorlevel 1 (
     echo [ОШИБКА] Сборка jar не удалась.
@@ -41,7 +41,7 @@ if errorlevel 1 (
 echo.
 
 REM ---------- 3. jpackage ----------
-echo [2/4] Упаковка мастера через jpackage...
+echo [2/3] Упаковка мастера через jpackage...
 
 set PROJECT_DIR=%~dp0
 set DIST_DIR=%PROJECT_DIR%dist
@@ -86,14 +86,8 @@ if errorlevel 1 (
 REM Чистим временную папку.
 rmdir /s /q "%INPUT_DIR%"
 
-REM ---------- 4. Фаервол ----------
-echo [3/4] Настройка фаервола Windows (порт 9000)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$rule = Get-NetFirewallRule -DisplayName 'Mandelbrot Master' -ErrorAction SilentlyContinue; if ($rule) { Write-Host '  правило уже существует' } else { New-NetFirewallRule -DisplayName 'Mandelbrot Master' -Direction Inbound -Protocol TCP -LocalPort 9000 -Action Allow | Out-Null; Write-Host '  правило добавлено' }"
-echo.
-
 REM ---------- 5. Удобный запуск ----------
-echo [4/4] Создаю start-master.cmd рядом с exe...
+echo [3/3] Создаю start-master.cmd рядом с exe...
 
 set MASTER_APP_DIR=%PROJECT_DIR%dist\MandelbrotMaster
 

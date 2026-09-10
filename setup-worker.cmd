@@ -31,7 +31,7 @@ if errorlevel 1 (
 )
 
 REM ---------- 2. Сборка jar ----------
-echo [1/4] Сборка jar...
+echo [1/3] Сборка jar...
 call "%~dp0build.cmd"
 if errorlevel 1 (
     echo [ОШИБКА] Сборка jar не удалась.
@@ -41,7 +41,7 @@ if errorlevel 1 (
 echo.
 
 REM ---------- 3. jpackage ----------
-echo [2/4] Упаковка воркера через jpackage...
+echo [2/3] Упаковка воркера через jpackage...
 
 set PROJECT_DIR=%~dp0
 set DIST_DIR=%PROJECT_DIR%dist
@@ -80,14 +80,8 @@ if errorlevel 1 (
 
 rmdir /s /q "%INPUT_DIR%"
 
-REM ---------- 4. Фаервол ----------
-echo [3/4] Настройка фаервола Windows (порт 8081)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$rule = Get-NetFirewallRule -DisplayName 'Mandelbrot Worker' -ErrorAction SilentlyContinue; if ($rule) { Write-Host '  правило уже существует' } else { New-NetFirewallRule -DisplayName 'Mandelbrot Worker' -Direction Inbound -Protocol TCP -LocalPort 8081 -Action Allow | Out-Null; Write-Host '  правило добавлено' }"
-echo.
-
 REM ---------- 5. Удобный запуск ----------
-echo [4/4] Создаю start-worker.cmd рядом с exe...
+echo [3/3] Создаю start-worker.cmd рядом с exe...
 
 set WORKER_APP_DIR=%PROJECT_DIR%dist\MandelbrotWorker
 

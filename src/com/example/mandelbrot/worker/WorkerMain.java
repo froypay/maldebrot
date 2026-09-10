@@ -1,10 +1,6 @@
 package com.example.mandelbrot.worker;
 
-import com.example.mandelbrot.common.Json;
-import com.example.mandelbrot.common.MandelbrotRenderer;
-import com.example.mandelbrot.common.NetUtils;
-import com.example.mandelbrot.common.RenderResult;
-import com.example.mandelbrot.common.RenderTask;
+import com.example.mandelbrot.common.*;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -46,6 +42,7 @@ public final class WorkerMain {
     private final String workerId;
     private final String myPublicUrl;
     private final AtomicBoolean registered = new AtomicBoolean(false);
+    boolean skipFirewall = false;
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -96,6 +93,16 @@ public final class WorkerMain {
     }
 
     private void start() throws Exception {
+        if (!skipFirewall) {
+            FirewallManager.Status st = FirewallManager.ensureRule(
+                    "Mandelbrot Worker " + port, port, true);
+            if (st == FirewallManager.Status.PERMISSION_DENIED
+                    || st == FirewallManager.Status.FAILED) {
+                log("ВНИМАНИЕ: правило фаервола не создано. "
+                        + "Мастер не сможет достучаться до воркера.");
+            }
+        }
+
         // 1. HTTP-сервер воркера.
         HttpServer server = HttpServer.create(new InetSocketAddress(bindHost, port), 0);
         server.setExecutor(Executors.newFixedThreadPool(4));

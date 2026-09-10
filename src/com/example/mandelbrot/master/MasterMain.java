@@ -1,8 +1,6 @@
 package com.example.mandelbrot.master;
 
-import com.example.mandelbrot.common.Json;
-import com.example.mandelbrot.common.RenderResult;
-import com.example.mandelbrot.common.RenderTask;
+import com.example.mandelbrot.common.*;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -26,7 +24,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
-import com.example.mandelbrot.common.NetUtils;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -69,6 +66,29 @@ public final class MasterMain {
     private static final WorkerRegistry REGISTRY = new WorkerRegistry(WORKER_TIMEOUT_MS);
 
     public static void main(String[] args) throws Exception {
+        boolean skipFirewall = false;
+        for (String a : args) {
+            if ("--no-firewall".equals(a)) skipFirewall = true;
+        }
+
+        if (!skipFirewall) {
+            FirewallManager.Status st = FirewallManager.ensureRule(
+                    "Mandelbrot Master " + MASTER_PORT, MASTER_PORT, true);
+            if (st == FirewallManager.Status.PERMISSION_DENIED
+                    || st == FirewallManager.Status.FAILED) {
+                log("ВНИМАНИЕ: правило фаервола не создано. "
+                        + "Воркеры в локальной сети могут не подключиться.");
+                log("Разрешите доступ вручную при запросе Windows "
+                        + "или запустите с --no-firewall, чтобы пропустить этот шаг.");
+            }
+        } else {
+            log("проверка фаервола пропущена (--no-firewall)");
+        }
+
+        log("стартую HTTP-сервер мастера на порту " + MASTER_PORT);
+        startHttpServer(MASTER_PORT);
+        writeMyIpFile();
+
         log("стартую HTTP-сервер мастера на порту " + MASTER_PORT);
         startHttpServer(MASTER_PORT);
 
