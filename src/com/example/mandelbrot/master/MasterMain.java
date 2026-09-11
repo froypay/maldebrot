@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Scanner;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -31,19 +32,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class MasterMain {
 
-    // ---------- Конфигурация рендера ----------
-    static int WIDTH        = 1600;
-    static int HEIGHT       = 1200;
-    static int MAX_ITER     = 500;
-    static double X_MIN     = -2.5;
-    static double X_MAX     =  1.0;
-    static double Y_MIN     = -1.2;
-    static double Y_MAX     =  1.2;
-    static int STRIP_HEIGHT = 40;
+    // ---------- Конфигурация рендера перенесена в отдельный модуль ----------
 
     // ---------- Сеть ----------
     static final int MASTER_PORT = 9000;
-    static final long WORKER_TIMEOUT_MS = 30_000; // для реестра (не используется в ping-модели)
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -52,76 +44,77 @@ public final class MasterMain {
     private static final WorkerRegistry REGISTRY = new WorkerRegistry();
 
     public static void main(String[] args) throws Exception {
-        // Разбор аргументов (те же, что раньше).
         String announceIp = null;
         boolean skipFirewall = false;
         for (int i = 0; i < args.length; i++) {
-            String a = args[i];
-            switch (a) {
-                case "--width"        -> WIDTH        = Integer.parseInt(args[++i]);
-                case "--height"       -> HEIGHT       = Integer.parseInt(args[++i]);
-                case "--max-iter"     -> MAX_ITER     = Integer.parseInt(args[++i]);
-                case "--strip"        -> STRIP_HEIGHT = Integer.parseInt(args[++i]);
-                case "--x-min"        -> X_MIN        = Double.parseDouble(args[++i]);
-                case "--x-max"        -> X_MAX        = Double.parseDouble(args[++i]);
-                case "--y-min"        -> Y_MIN        = Double.parseDouble(args[++i]);
-                case "--y-max"        -> Y_MAX        = Double.parseDouble(args[++i]);
-                case "--announce-ip"  -> announceIp   = args[++i];
-                case "--no-firewall"  -> skipFirewall = true;
-                default -> {
-                    log("Неизвестный аргумент: " + a);
-                    System.exit(2);
-                }
+            switch (args[i]) {
+                case "--announce-ip" -> announceIp = args[++i];
+                case "--no-firewall" -> skipFirewall = true;
             }
         }
 
-        // Фаервол.
+        // ---------- 2. Firewall ----------
         if (!skipFirewall) {
-            FirewallManager.Status s1 = FirewallManager.ensureRule(
+            FirewallManager.ensureRule(
                     "Mandelbrot Master HTTP", MASTER_PORT, "TCP", true);
-            FirewallManager.Status s2 = FirewallManager.ensureRule(
+            FirewallManager.ensureRule(
                     "Mandelbrot Master Discovery", Discovery.DISCOVERY_PORT, "UDP", true);
+        }
 
-            if (s1 == FirewallManager.Status.PERMISSION_DENIED
-                    || s1 == FirewallManager.Status.FAILED
-                    || s2 == FirewallManager.Status.PERMISSION_DENIED
-                    || s2 == FirewallManager.Status.FAILED) {
-                log("ВНИМАНИЕ: не все правила фаервола созданы.");
-                log("Воркеры могут не найти мастера или не подключиться.");
+        // ---------- 3. Конфигурация рендера ----------
+        Scanner scanner = new Scanner(System.in);
+        RenderConfig config = RenderConfig.fromArgsOrNull(args);
+        if (config == null) {
+            config = RenderConfig.interactive(scanner);
+            if (config == null) {
+                log("настройка отменена, выход");
+                return;
+            }
+        } else {
+            log("конфигурация из CLI: " + config.describe());
+            String err = config.validate();
+            if (err != null) {
+                log("ОШИБКА в CLI: " + err);
+                System.exit(2);
             }
         }
 
+        // ---------- 4. HTTP-сервер мастера ----------
         log("стартую HTTP-сервер мастера на порту " + MASTER_PORT);
         startHttpServer(MASTER_PORT);
 
-        // Announcer — рассылает broadcast.
+        // ---------- 5. Announcer ----------
         MasterAnnouncer announcer = new MasterAnnouncer(MASTER_PORT, announceIp);
         announcer.start();
 
-        // Health monitor — пингует воркеров каждые 10 сек.
+        // ---------- 6. Health monitor ----------
         REGISTRY.startHealthMonitor();
 
-        writeMyIpFile();
+        writeMyIpFile(announceIp);
 
-        log("параметры рендера: " + WIDTH + "x" + HEIGHT
-                + ", maxIter=" + MAX_ITER
-                + ", strip=" + STRIP_HEIGHT);
+        log("параметры рендера: " + config.describe());
 
-        // Основной цикл: ждём Enter → рендерим → снова ждём.
-        BufferedReader console = new BufferedReader(
-                new InputStreamReader(System.in));
-
+        // ---------- 7. Основной цикл ----------
         while (true) {
             log("");
             log("=== Нажмите Enter, чтобы начать рендер ===");
-            log("=== (Ctrl+C — выход) ===");
-            String line = console.readLine();
-            if (line == null) break; // EOF
+            log("=== 'c' + Enter — изменить настройки ===");
+            log("=== 'q' + Enter — выход ===");
+            String line = scanner.nextLine().trim().toLowerCase();
+
+            if ("q".equals(line)) break;
+            if ("c".equals(line)) {
+                RenderConfig updated = RenderConfig.interactive(scanner);
+                if (updated != null) {
+                    config = updated;
+                    log("новые параметры: " + config.describe());
+                }
+                continue;
+            }
 
             List<WorkerRegistry.Entry> alive = REGISTRY.alive();
             if (alive.isEmpty()) {
                 log("Нет живых воркеров — жду подключения...");
-                log("(воркеры подключаются автоматически по broadcast)");
                 continue;
             }
             log("живых воркеров: " + alive.size());
@@ -130,11 +123,10 @@ public final class MasterMain {
             }
 
             try {
-                renderAndSave(alive);
+                renderAndSave(alive, config);
             } catch (Exception e) {
                 log("ошибка рендера: " + e.getMessage());
             }
-            // После рендера — снова ждём Enter.
         }
         log("выход");
     }
@@ -206,13 +198,15 @@ public final class MasterMain {
     //  Рендер — та же логика, что была
     // ============================================================
 
-    private static void renderAndSave(List<WorkerRegistry.Entry> alive) throws Exception {
+    private static void renderAndSave(List<WorkerRegistry.Entry> alive,
+                                      RenderConfig config) throws Exception {
         long t0 = System.currentTimeMillis();
 
-        List<RenderTask> tasks = buildTasks();
+        List<RenderTask> tasks = buildTasks(config);
         log("всего задач (полос): " + tasks.size());
 
-        BufferedImage image = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB);
+        BufferedImage image = new BufferedImage(
+                config.width, config.height, BufferedImage.TYPE_INT_RGB);
 
         ExecutorService pool = Executors.newFixedThreadPool(alive.size());
         AtomicInteger nextTask = new AtomicInteger(0);
@@ -222,7 +216,8 @@ public final class MasterMain {
         List<Future<?>> futures = new ArrayList<>();
         for (WorkerRegistry.Entry worker : alive) {
             futures.add(pool.submit(() ->
-                    workerLoop(worker.baseUrl, tasks, nextTask, completed, totalTasks, image)));
+                    workerLoop(worker.baseUrl, tasks, nextTask,
+                            completed, totalTasks, image)));
         }
         for (Future<?> f : futures) {
             try { f.get(); } catch (Exception e) {
@@ -240,14 +235,15 @@ public final class MasterMain {
                 + " (" + out.length() / 1024 + " КБ)");
     }
 
-    private static List<RenderTask> buildTasks() {
+    private static List<RenderTask> buildTasks(RenderConfig config) {
         List<RenderTask> tasks = new ArrayList<>();
         int id = 0;
-        for (int y = 0; y < HEIGHT; y += STRIP_HEIGHT) {
-            int yEnd = Math.min(y + STRIP_HEIGHT - 1, HEIGHT - 1);
+        for (int y = 0; y < config.height; y += config.stripHeight) {
+            int yEnd = Math.min(y + config.stripHeight - 1, config.height - 1);
             tasks.add(new RenderTask(id++, y, yEnd,
-                    WIDTH, HEIGHT, MAX_ITER,
-                    X_MIN, X_MAX, Y_MIN, Y_MAX));
+                    config.width, config.height, config.maxIter,
+                    config.xMin, config.xMax, config.yMin, config.yMax,
+                    config.antiAliasing));
         }
         return tasks;
     }
@@ -326,12 +322,24 @@ public final class MasterMain {
     //  IP-файл
     // ============================================================
 
-    private static void writeMyIpFile() {
+    /**
+     * Пишет в master-ip.txt URL мастера.
+     * Если announceIp задан явно — использует его.
+     * Иначе — определяет через NetUtils.
+     */
+    private static void writeMyIpFile(String explicitIp) {
         try {
-            String localIp = NetUtils.detectLocalIp("8.8.8.8");
-            String url = "http://" + localIp + ":" + MASTER_PORT;
+            String ip;
+            if (explicitIp != null && !explicitIp.isBlank()) {
+                ip = explicitIp;
+            } else {
+                ip = NetUtils.detectLocalIp("8.8.8.8");
+            }
+            String url = "http://" + ip + ":" + MASTER_PORT;
+
             Path file = Path.of(System.getProperty("user.home"), "master-ip.txt");
             Files.writeString(file, url + System.lineSeparator());
+
             log("мой IP для воркеров: " + url);
             log("записал в " + file.toAbsolutePath());
         } catch (Exception e) {

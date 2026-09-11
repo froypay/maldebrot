@@ -21,15 +21,13 @@ public final class RenderTask {
     public final int width;
     public final int height;
     public final int maxIter;
-    public final double xMin;
-    public final double xMax;
-    public final double yMin;
-    public final double yMax;
+    public final double xMin, xMax, yMin, yMax;
+    public final int antiAliasing;
 
     public RenderTask(int taskId, int yStart, int yEnd,
                       int width, int height, int maxIter,
                       double xMin, double xMax,
-                      double yMin, double yMax) {
+                      double yMin, double yMax, int antiAliasing) {
         this.taskId = taskId;
         this.yStart = yStart;
         this.yEnd = yEnd;
@@ -40,6 +38,7 @@ public final class RenderTask {
         this.xMax = xMax;
         this.yMin = yMin;
         this.yMax = yMax;
+        this.antiAliasing = antiAliasing;
     }
 
     /** Сколько строк в полосе. */
@@ -59,13 +58,24 @@ public final class RenderTask {
         sb.append("\"xMin\":").append(xMin).append(',');
         sb.append("\"xMax\":").append(xMax).append(',');
         sb.append("\"yMin\":").append(yMin).append(',');
-        sb.append("\"yMax\":").append(yMax);
+        sb.append("\"yMax\":").append(yMax).append(',');
+        sb.append("\"antiAliasing\":").append(antiAliasing);
         sb.append('}');
         return sb.toString();
     }
 
     public static RenderTask fromJson(String json) {
         Json j = Json.parse(json);
+
+        // antiAliasing может отсутствовать (старый мастер).
+        // По умолчанию — 1 (без сглаживания).
+        int aa = 1;
+        try {
+            aa = (int) j.getLong("antiAliasing");
+        } catch (Exception ignored) {
+            // поля нет — оставляем 1
+        }
+
         return new RenderTask(
                 (int) j.getLong("taskId"),
                 (int) j.getLong("yStart"),
@@ -76,7 +86,8 @@ public final class RenderTask {
                 j.getDouble("xMin"),
                 j.getDouble("xMax"),
                 j.getDouble("yMin"),
-                j.getDouble("yMax")
+                j.getDouble("yMax"),
+                aa
         );
     }
 }

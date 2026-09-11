@@ -187,7 +187,7 @@ public final class WorkerMain {
             RenderTask task = RenderTask.fromJson(reqBody);
 
             long t0 = System.currentTimeMillis();
-            int[] pixels = MandelbrotRenderer.renderStrip(task);
+            int[] pixels = MandelbrotRenderer.renderStrip(task, task.antiAliasing); // ← AA
             long ms = System.currentTimeMillis() - t0;
 
             byte[] bytes = new byte[pixels.length * 4];

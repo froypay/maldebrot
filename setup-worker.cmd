@@ -3,11 +3,11 @@ chcp 65001 >nul
 REM ============================================================
 REM  setup-worker.cmd
 REM  Запускается ОДИН РАЗ на каждой воркер-машине.
-REM  Делает всё:
+REM  Делает:
 REM    1) собирает jar
 REM    2) собирает app-image через jpackage
-REM    3) разрешает порт 8081 в фаерволе Windows
-REM    4) кладёт рядом с exe удобный start-worker.cmd
+REM    3) кладёт рядом с exe удобный start-worker.cmd
+REM  Фаервол настраивается самим приложением при первом запуске.
 REM ============================================================
 setlocal
 
@@ -80,7 +80,7 @@ if errorlevel 1 (
 
 rmdir /s /q "%INPUT_DIR%"
 
-REM ---------- 5. Удобный запуск ----------
+REM ---------- 4. start-worker.cmd ----------
 echo [3/3] Создаю start-worker.cmd рядом с exe...
 
 set WORKER_APP_DIR=%PROJECT_DIR%dist\MandelbrotWorker
@@ -91,13 +91,10 @@ if not exist "%WORKER_APP_DIR%" (
     exit /b 1
 )
 
-set /p MASTER_IP="Введите IP мастера (например, 192.168.1.10): "
-if "%MASTER_IP%"=="" set MASTER_IP=127.0.0.1
-
 (
     echo @echo off
     echo cd /d "%%~dp0"
-    echo MandelbrotWorker.exe --master http://%MASTER_IP%:9000 %%*
+    echo MandelbrotWorker.exe %%*
     echo pause
 ) > "%WORKER_APP_DIR%\start-worker.cmd"
 
@@ -105,17 +102,20 @@ echo   создан: %WORKER_APP_DIR%\start-worker.cmd
 
 echo.
 echo ============================================================
-echo   ГОТОВО!
+echo   ГОТОВО
 echo ============================================================
 echo.
-echo   Воркер установлен в: dist\MandelbrotWorker\
-echo   Мастер указан как:   http://%MASTER_IP%:9000
+echo   Воркер установлен в: dist\MandelbrotWorker
 echo.
 echo   Запуск:
 echo     dist\MandelbrotWorker\start-worker.cmd
 echo   или двойной клик на MandelbrotWorker.exe
 echo.
-echo   Если IP мастера изменится — отредактируйте start-worker.cmd.
+echo   Воркер сам найдёт мастера в локальной сети через broadcast.
+echo   IP вводить не нужно.
+echo.
+echo   Если Windows спросит про доступ к сети — разрешите
+echo   для "Частных сетей".
 echo.
 pause
 endlocal
