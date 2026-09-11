@@ -48,11 +48,12 @@ public final class WorkerMain {
         this.masterUrl = masterUrl;
         this.bindHost = bindHost;
         this.port = port;
-        this.workerId = "worker-" + port;
 
         String ip = "0.0.0.0".equals(bindHost)
                 ? NetUtils.detectLocalIp(URI.create(masterUrl).getHost())
                 : bindHost;
+        String shortIp = ip.substring(ip.lastIndexOf('.') + 1);   // последний октет
+        this.workerId = "worker-" + shortIp + "-" + port;
         this.myPublicUrl = "http://" + ip + ":" + port;
     }
 
